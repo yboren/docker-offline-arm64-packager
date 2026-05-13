@@ -1,0 +1,65 @@
+name: 自动读取文件下载 ARM64 镜像
+
+on:
+  workflow_dispatch: # 支持手动点击按钮触发
+  push:
+    paths:
+      - 'docker-list.txt' # 当你修改并提交 docker-list.txt 时，也会自动触发打包
+
+jobs:
+  build-and-pack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. 检查并下载代码仓库的文件
+        uses: actions/checkout@v4
+
+      - name: 2. 设置 QEMU 模拟器
+        uses: docker/setup-qemu-action@v3
+
+      - name: 3. 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 4. 创建输出目录
+        run: mkdir -p ./images_output
+
+      - name: 5. 读取文件并批量打包
+        run: |
+          # 检查文件是否存在
+          if [ ! -f "docker-list.txt" ]; then
+            echo "错误: 找不到 docker-list.txt 文件！"
+            exit 1
+          fi
+          
+          # 循环读取文本文件
+          while read -r image || [ -n "$image" ]; do
+            # 过滤空行、回车符和以 # 开头的注释行
+            [[ -z "$image" || "$image" =~ ^# ]] && continue
+            image=$(echo "$image" | tr -d '\r' | xargs)
+            
+            echo "------------------------------------------"
+            echo "正在处理 ARM64 架构: $image"
+            echo "------------------------------------------"
+            
+            # 转换为合法文件名
+            safe_name=$(echo "$image" | tr ':/' '__')
+            tar_path="./images_output/${safe_name}.tar"
+            
+            # 跨架构导出
+            docker buildx build \
+              --platform linux/arm64 \
+              --output type=docker,dest="$tar_path" \
+              - <<EOF
+          FROM $image
+          EOF
+            
+            # 极速压缩
+            gzip -9 "$tar_path"
+            
+          done < docker-list.txt
+
+      - name: 6. 上传整包到 GitHub 网页
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-arm64-batch-package
+          path: ./images_output/*.tar.gz
+          retention-days: 3
