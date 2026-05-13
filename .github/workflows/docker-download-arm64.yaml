@@ -1,65 +1,90 @@
-name: 自动读取文件下载 ARM64 镜像
+name: Batch Download ARM64 Images to Release
 
 on:
-  workflow_dispatch: # 支持手动点击按钮触发
+  workflow_dispatch:
   push:
     paths:
-      - 'docker-list.txt' # 当你修改并提交 docker-list.txt 时，也会自动触发打包
+      - 'docker-list.txt'
+
+permissions:
+  contents: write # 显式赋予工作流创建 Release 的权限
 
 jobs:
   build-and-pack:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. 检查并下载代码仓库的文件
+      - name: 1. Checkout repository
         uses: actions/checkout@v4
 
-      - name: 2. 设置 QEMU 模拟器
+      - name: 2. Set up QEMU
         uses: docker/setup-qemu-action@v3
 
-      - name: 3. 设置 Docker Buildx
+      - name: 3. Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: 4. 创建输出目录
+      - name: 4. Create output directory
         run: mkdir -p ./images_output
 
-      - name: 5. 读取文件并批量打包
+      - name: 5. Read file and batch build ARM64 images
         run: |
-          # 检查文件是否存在
           if [ ! -f "docker-list.txt" ]; then
-            echo "错误: 找不到 docker-list.txt 文件！"
+            echo "Error: docker-list.txt not found!"
             exit 1
           fi
           
-          # 循环读取文本文件
           while read -r image || [ -n "$image" ]; do
-            # 过滤空行、回车符和以 # 开头的注释行
             [[ -z "$image" || "$image" =~ ^# ]] && continue
             image=$(echo "$image" | tr -d '\r' | xargs)
             
             echo "------------------------------------------"
-            echo "正在处理 ARM64 架构: $image"
+            echo "Processing ARM64 Image: $image"
             echo "------------------------------------------"
             
-            # 转换为合法文件名
             safe_name=$(echo "$image" | tr ':/' '__')
             tar_path="./images_output/${safe_name}.tar"
             
-            # 跨架构导出
-            docker buildx build \
-              --platform linux/arm64 \
-              --output type=docker,dest="$tar_path" \
-              - <<EOF
-          FROM $image
+            cat <<EOF > LocalDockerfile
+            FROM --platform=linux/arm64 $image
           EOF
             
-            # 极速压缩
+            docker buildx build \
+              --platform linux/arm64 \
+              --file LocalDockerfile \
+              --output type=tar,dest="$tar_path" .
+            
+            rm -f LocalDockerfile
             gzip -9 "$tar_path"
             
           done < docker-list.txt
 
-      - name: 6. 上传整包到 GitHub 网页
+      - name: 6. Get current date for Tag
+        id: date
+        run: echo "date=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
+
+      - name: 7. Create GitHub Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.date.outputs.date }}
+          name: Docker ARM64 Offline Images v${{ steps.date.outputs.date }}
+          body: |
+            ### 📦 ARM64 Offline Docker Images Package
+            
+            These images are successfully built, converted to **linux/arm64** architecture, and compressed via GitHub Actions.
+            
+            #### ⚙️ How to Import:
+            1. Download the `.tar.gz` assets below.
+            2. Transfer them to your ARM64 server.
+            3. Run the following command to batch import:
+               ```bash
+               ls *.tar.gz | xargs -I {} sh -c "zcat {} | docker load"
+               ```
+          draft: false
+          prerelease: false
+          files: ./images_output/*.tar.gz # 自动匹配文件夹下所有的 .tar.gz 文件单独上传
+      - name: 8. 同时上传一份到 Action Artifacts (双重保险)
         uses: actions/upload-artifact@v4
         with:
           name: docker-arm64-batch-package
           path: ./images_output/*.tar.gz
           retention-days: 3
+
